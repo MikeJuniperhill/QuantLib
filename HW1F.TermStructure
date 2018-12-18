@@ -1,0 +1,142 @@
+%config IPCompleter.greedy = True
+import math as Math
+from QuantLib import *
+import numpy as Numpy
+import matplotlib.pyplot as Matplotlib
+
+def main():
+
+    # create grid object for 30Y, having time step of 1 day
+    startDate = Date(3, December, 2018)
+    endDate = Date(3, December, 2048)
+    tenor = Period(1, Days)
+    grid = Grid(startDate, endDate, tenor)
+
+    # create yield curve and Hull-White one-factor interest rate model
+    curve = YieldTermStructureHandle(FlatForward(startDate, 0.04875825, Actual365Fixed()))
+    reversionSpeed = 0.05
+    rateVolatility = 0.00586
+    process = HullWhiteProcess(curve, reversionSpeed, rateVolatility)
+
+    # request paths from generator method
+    nPaths = 250
+    paths = GeneratePaths(process, grid.GetTimeGrid(), nPaths)
+
+    # container for simulated zero-coupon bonds
+    zeros = Numpy.zeros(shape = (grid.GetSize()))
+    dt = grid.GetDt()
+    gridSize = grid.GetSize()
+
+    # process short-rate path integrations for all simulated paths
+    for i in range(nPaths):
+        integral = 0.0
+        for j in range(gridSize):
+            integral = integral + paths[i, j]
+            if(j == 0):
+                # zero-coupon bond price today is 1.0
+                zeros[j] = 1.0 * nPaths
+            else:
+                zeros[j] = zeros[j] + Math.exp(-integral * dt)
+
+    # calculate averages for all simulated zero-coupon bond prices
+    zeros = zeros / nPaths
+
+    # create yield term structure object from simulated bond prices
+    times = grid.GetTimes()
+    dates = grid.GetDates()
+    simulatedCurve = DiscountCurve(dates, zeros, Actual365Fixed(), NullCalendar())
+
+    # get discount factors for simulated and original yield curves
+    dfs = Numpy.zeros(shape = (gridSize))
+    simulatedDfs = Numpy.zeros(shape = (gridSize))
+    for i in range(gridSize):
+        simulatedDfs[i] = simulatedCurve.discount(times[i])
+        dfs[i] = curve.discount(times[i])
+
+    # plot simulated and original discount factors
+    Matplotlib.title('discount factors')
+    Matplotlib.plot(times, simulatedDfs, linestyle = 'dashed', label = 'simulated curve')
+    Matplotlib.plot(times, dfs, linestyle = 'solid', label = 'original curve')
+    Matplotlib.legend()
+    Matplotlib.show()
+
+    # plot difference between simulated and original discount factors in basis points
+    Matplotlib.title('difference (bps)')
+    Matplotlib.plot(times, (dfs - simulatedDfs) * 10000)
+    Matplotlib.show()
+
+    
+# path generator method for uncorrelated and correlated 1-D stochastic processes
+def GeneratePaths(process, timeGrid, n):
+
+    # correlated processes, use GaussianMultiPathGenerator
+    if(type(process) == StochasticProcessArray):
+        times = []; [times.append(timeGrid[t]) for t in range(len(timeGrid))]        
+        nGridSteps = (len(times) - 1) * process.size()
+        sequenceGenerator = UniformRandomSequenceGenerator(nGridSteps, UniformRandomGenerator())
+        gaussianSequenceGenerator = GaussianRandomSequenceGenerator(sequenceGenerator)
+        pathGenerator = GaussianMultiPathGenerator(process, times, gaussianSequenceGenerator, False)        
+        paths = Numpy.zeros(shape = (n, process.size(), len(timeGrid)))
+        
+        # loop through number of paths
+        for i in range(n):
+            # request multiPath, which contains the list of paths for each process
+            multiPath = pathGenerator.next().value()
+            # loop through number of processes
+            for j in range(multiPath.assetNumber()):
+                # request path, which contains the list of simulated prices for a process
+                path = multiPath[j]
+                # push prices to array
+                paths[i, j, :] = Numpy.array([path[k] for k in range(len(path))])
+        # resulting array dimension: n, process.size(), len(timeGrid)
+        return paths
+
+    # uncorrelated processes, use GaussianPathGenerator
+    else:
+        sequenceGenerator = UniformRandomSequenceGenerator(len(timeGrid), UniformRandomGenerator())
+        gaussianSequenceGenerator = GaussianRandomSequenceGenerator(sequenceGenerator)
+        maturity = timeGrid[len(timeGrid) - 1]
+        pathGenerator = GaussianPathGenerator(process, maturity, len(timeGrid), gaussianSequenceGenerator, False)
+        paths = Numpy.zeros(shape = (n, len(timeGrid)))
+        for i in range(n):
+            path = pathGenerator.next().value()
+            paths[i, :] = Numpy.array([path[j] for j in range(len(timeGrid))])
+        # resulting array dimension: n, len(timeGrid)
+        return paths
+
+
+# class for hosting schedule-related information (dates, times)
+class Grid:
+    def __init__(self, startDate, endDate, tenor):
+        # create date schedule, ignore conventions and calendars
+        self.schedule = Schedule(startDate, endDate, tenor, NullCalendar(), 
+            Unadjusted, Unadjusted, DateGeneration.Forward, False)
+        self.dayCounter = Actual365Fixed()
+    def GetDates(self):
+        # get list of scheduled dates
+        dates = []
+        [dates.append(self.schedule[i]) for i in range(self.GetSize())]
+        return dates
+    def GetTimes(self):
+        # get list of scheduled times
+        times = []
+        [times.append(self.dayCounter.yearFraction(self.schedule[0], self.schedule[i])) 
+            for i in range(self.GetSize())]
+        return times
+    def GetMaturity(self):
+        # get maturity in time units
+        return self.dayCounter.yearFraction(self.schedule[0], self.schedule[self.GetSteps()])
+    def GetSteps(self):
+        # get number of steps in schedule
+        return self.GetSize() - 1    
+    def GetSize(self):
+        # get total number of items in schedule
+        return len(self.schedule)    
+    def GetTimeGrid(self):
+        # get QuantLib TimeGrid object, constructed by using list of scheduled times
+        return TimeGrid(self.GetTimes(), self.GetSize())
+    def GetDt(self):
+        # get constant time step
+        return self.GetMaturity() / self.GetSteps()
+    
+main()
