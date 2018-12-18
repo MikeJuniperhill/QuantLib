@@ -1,0 +1,89 @@
+%config IPCompleter.greedy = True
+from QuantLib import *
+import numpy as Numpy
+
+# hard-coded data
+def CreateSwaptionVolatilityList():
+    vol = []
+    vol.append(0.1148)
+    vol.append(0.1108)
+    vol.append(0.1070)
+    vol.append(0.1021)
+    vol.append(0.1000)
+    return vol
+
+class ModelCalibrator:
+    def __init__(self, endCriteria):        
+        self.endCriteria = endCriteria
+        self.helpers = []
+
+    def AddCalibrationHelper(self, helper):
+        self.helpers.append(helper)
+
+    def Calibrate(self, model, engine, curve, fixedParameters):
+        # assign pricing engine to all calibration helpers
+        for i in range(len(self.helpers)):
+            self.helpers[i].setPricingEngine(engine)
+        method = LevenbergMarquardt()
+        if(len(fixedParameters) == 0):
+            model.calibrate(self.helpers, method, self.endCriteria)
+        else:
+            model.calibrate(self.helpers, method, self.endCriteria,
+                NoConstraint(), [], fixedParameters)
+
+# general parameters
+tradeDate = Date(15, February, 2002)
+Settings.instance().evaluationDate = tradeDate
+settlementDate = Date(19, February, 2002)
+calendar = TARGET()
+dayCounter = Actual360()
+
+# create market data: term structure and diagonal volatilities
+curveHandle = YieldTermStructureHandle(FlatForward(settlementDate, 0.04875825, Actual365Fixed()))
+vol = CreateSwaptionVolatilityList()
+
+# create calibrator object
+endCriteria = EndCriteria(10000, 100, 0.000001, 0.00000001, 0.00000001)
+calibrator = ModelCalibrator(endCriteria)
+
+# add swaption helpers to calibrator
+for i in range(len(vol)):
+    t = i + 1; tenor = len(vol) - i    
+    helper = SwaptionHelper(
+        Period(t, Years), 
+        Period(tenor, Years), 
+        QuoteHandle(SimpleQuote(vol[i])), 
+        USDLibor(Period(3, Months), curveHandle), 
+        Period(1, Years), 
+        dayCounter, 
+        dayCounter, 
+        curveHandle)    
+    calibrator.AddCalibrationHelper(helper)
+
+# create model and pricing engine, calibrate model and print calibrated parameters
+print('case 1 : calibrate all involved parameters (HW1F : reversion, sigma)')
+model = HullWhite(curveHandle)
+engine = JamshidianSwaptionEngine(model)
+fixedParameters = []
+calibrator.Calibrate(model, engine, curveHandle, fixedParameters)
+print('calibrated reversion: ' + str(round(model.params()[0], 5)))
+print('calibrated sigma: ' + str(round(model.params()[1], 5)))
+print()
+
+print('case 2 : calibrate sigma and fix reversion to 0.05')
+model = HullWhite(curveHandle, 0.05, 0.0001)
+engine = JamshidianSwaptionEngine(model)
+fixedParameters = [True, False]
+calibrator.Calibrate(model, engine, curveHandle, fixedParameters)
+print('fixed reversion: ' + str(round(model.params()[0], 5)))
+print('calibrated sigma: ' + str(round(model.params()[1], 5)))
+print()
+
+print('case 3 : calibrate reversion and fix sigma to 0.01')
+model = HullWhite(curveHandle, 0.05, 0.01)
+engine = JamshidianSwaptionEngine(model)
+fixedParameters = [False, True]
+calibrator.Calibrate(model, engine, curveHandle, fixedParameters)
+print('calibrated reversion: ' + str(round(model.params()[0], 5)))
+print('fixed sigma: ' + str(round(model.params()[1], 5)))
+print()
