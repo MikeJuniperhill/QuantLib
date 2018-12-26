@@ -1,0 +1,172 @@
+import time
+import math as Math
+from QuantLib import *
+import numpy as Numpy
+import matplotlib.pyplot as Matplotlib
+import multiprocessing as mp
+
+def main():
+    t_start = time.time()
+    # create daily grid for 30Y
+    startDate = Date(3, December, 2018)
+    endDate = Date(3, December, 2048)
+    gridStepTenor = Period(1, Days)
+    grid = Grid(startDate, endDate, gridStepTenor)
+
+    # create yield curve and Hull-White one-factor model
+    curve = YieldTermStructureHandle(FlatForward(startDate, 0.04875825, Actual365Fixed()))
+    HW1F = HullWhiteProcess(curve, 0.05, 0.00586)
+
+    # task of generating paths is highly time critical
+    # use multiprocessing for path generation
+    # create lambdas for multiprocessing wrapper
+    # target signature: def GeneratePaths(seed, process, timeGrid, n)
+    nPaths = 1000
+    nProcesses = 2
+    seeds = [1834, 66023]
+    nPathsPerProcess = int(nPaths / nProcesses)
+    target_1 = lambda:GeneratePaths(seeds[0], HW1F, grid.GetTimeGrid(), nPathsPerProcess)
+    target_2 = lambda:GeneratePaths(seeds[1], HW1F, grid.GetTimeGrid(), nPathsPerProcess)
+    targetFunctionList = [target_1, target_2]
+    t0 = time.time()
+    results = MultiprocessingWrapper(targetFunctionList)
+    print('time for path generations', time.time() - t0)
+
+    # task of integrating generated paths is highly time critical
+    # use multiprocessing for path integrations
+    # create lambdas for multiprocessing wrapper
+    # target signature: def PathIntegration(paths, grid)
+    target_1 = lambda:PathIntegration(results[0], grid)
+    target_2 = lambda:PathIntegration(results[1], grid)
+    targetFunctionList = [target_1, target_2]
+    t0 = time.time()
+    results = MultiprocessingWrapper(targetFunctionList)
+    print('time for path integrations', time.time() - t0)
+
+    # calculate averages
+    zeros = (results[0] + results[1]) / nPaths
+
+    # create yield term structure object from simulated zero-coupon prices
+    times = grid.GetTimes()
+    dates = grid.GetDates()
+    simulatedCurve = DiscountCurve(dates, zeros, Actual365Fixed(), NullCalendar())
+
+    # get discount factors for simulated and original yield curves
+    gridSize = grid.GetSize()
+    dfs = Numpy.zeros(shape = (gridSize))
+    simulatedDfs = Numpy.zeros(shape = (gridSize))
+    for i in range(gridSize):
+        simulatedDfs[i] = simulatedCurve.discount(times[i])
+        dfs[i] = curve.discount(times[i])
+
+    # plot simulated and original discount factors
+    Matplotlib.title('discount factors')
+    Matplotlib.plot(times, simulatedDfs, linestyle = 'dashed', label = 'simulated curve')
+    Matplotlib.plot(times, dfs, linestyle = 'solid', label = 'original curve')
+    Matplotlib.legend()
+    Matplotlib.show()
+
+    # plot difference between simulated and original discount factors in basis points
+    Matplotlib.title('difference (bps)')
+    Matplotlib.plot(times, (dfs - simulatedDfs) * 10000)
+    Matplotlib.show()
+    print('time for everything', time.time() - t_start)
+
+
+# method for executing given lambdas in parallel
+def MultiprocessingWrapper(targetFunctionList):
+    processList = []
+    aggregatedResults = []
+    queue = mp.Manager().Queue()
+
+    # execute lambda from a given list based on a given index
+    # storing results into queue
+    def Worker(index):
+        result = targetFunctionList[index]()
+        queue.put(result)
+    
+    # start processes, call worker method with index number
+    for i in range(len(targetFunctionList)):
+        process = mp.Process(target = Worker, args = (i,))
+        processList.append(process)
+        process.start()
+    
+    # join processes, extract queue into results list
+    for process in processList:
+        process.join()
+        aggregatedResults.append(queue.get())
+        
+    # return list of results for a client
+    return aggregatedResults
+
+
+# grid is QuantLib TimeGrid object
+def PathIntegration(paths, grid):    
+    # create container for zero-coupon bonds
+    gridSize = grid.GetSize()
+    zeros = Numpy.zeros(shape = (gridSize))
+    dt = grid.GetDt()
+    nPaths = paths.shape[0]
+    for i in range(nPaths):
+        integral = 0.0
+        for j in range(gridSize):
+            integral = integral + paths[i, j]
+            if(j == 0):
+                # zero-coupon bond price today is 1.0
+                zeros[j] = 1.0 * nPaths
+            else:
+                zeros[j] = zeros[j] + Math.exp(-integral * dt)
+    return zeros
+
+
+# path generator method for 1-D stochastic processes
+# timeGrid is QuantLib TimeGrid object
+def GeneratePaths(seed, process, timeGrid, n):
+    sequenceGenerator = UniformRandomSequenceGenerator(len(timeGrid), UniformRandomGenerator(seed))
+    gaussianSequenceGenerator = GaussianRandomSequenceGenerator(sequenceGenerator)
+    maturity = timeGrid[len(timeGrid) - 1]
+    pathGenerator = GaussianPathGenerator(process, maturity, len(timeGrid), gaussianSequenceGenerator, False)
+    paths = Numpy.zeros(shape = (n, len(timeGrid)))
+    for i in range(n):
+        path = pathGenerator.next().value()
+        paths[i, :] = Numpy.array([path[j] for j in range(len(timeGrid))])
+    # resulting array dimension: n, len(timeGrid)
+    return paths
+
+
+# class for hosting schedule-related information (dates, times)
+class Grid:
+    def __init__(self, startDate, endDate, tenor):
+        # create date schedule, ignore conventions and calendars
+        self.schedule = Schedule(startDate, endDate, tenor, NullCalendar(), 
+            Unadjusted, Unadjusted, DateGeneration.Forward, False)
+        self.dayCounter = Actual365Fixed()
+    def GetDates(self):
+        # get list of scheduled dates
+        dates = []
+        [dates.append(self.schedule[i]) for i in range(self.GetSize())]
+        return dates
+    def GetTimes(self):
+        # get list of scheduled times
+        times = []
+        [times.append(self.dayCounter.yearFraction(self.schedule[0], self.schedule[i])) 
+            for i in range(self.GetSize())]
+        return times
+    def GetMaturity(self):
+        # get maturity in time units
+        return self.dayCounter.yearFraction(self.schedule[0], self.schedule[self.GetSteps()])
+    def GetSteps(self):
+        # get number of steps in schedule
+        return self.GetSize() - 1    
+    def GetSize(self):
+        # get total number of items in schedule
+        return len(self.schedule)    
+    def GetTimeGrid(self):
+        # get QuantLib TimeGrid object, constructed by using list of scheduled times
+        return TimeGrid(self.GetTimes(), self.GetSize())
+    def GetDt(self):
+        # get constant time step
+        return self.GetMaturity() / self.GetSteps()
+
+
+main()
